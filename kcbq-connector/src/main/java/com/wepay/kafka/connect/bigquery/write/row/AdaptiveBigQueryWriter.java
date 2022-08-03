@@ -84,7 +84,7 @@ public class AdaptiveBigQueryWriter extends BigQueryWriter {
   @Override
   public Map<Long, List<BigQueryError>> performWriteRequest(
           PartitionedTableId tableId,
-          SortedMap<SinkRecord, InsertAllRequest.RowToInsert> rows) {
+          SortedMap<SinkRecord, InsertAllRequest.RowToInsert> rows) throws InterruptedException {
     InsertAllResponse writeResponse = null;
     InsertAllRequest request = null;
 
@@ -147,7 +147,7 @@ public class AdaptiveBigQueryWriter extends BigQueryWriter {
     return new HashMap<>();
   }
 
-  protected void attemptSchemaUpdate(PartitionedTableId tableId, List<SinkRecord> records) {
+  protected void attemptSchemaUpdate(PartitionedTableId tableId, List<SinkRecord> records) throws InterruptedException {
     try {
       schemaManager.updateSchema(tableId.getBaseTableId(), records);
     } catch (BigQueryException exception) {
@@ -156,7 +156,7 @@ public class AdaptiveBigQueryWriter extends BigQueryWriter {
     }
   }
 
-  protected void attemptTableCreate(TableId tableId, List<SinkRecord> records) {
+  protected void attemptTableCreate(TableId tableId, List<SinkRecord> records) throws InterruptedException {
     try {
       schemaManager.createTable(tableId, records);
     } catch (BigQueryException exception) {

@@ -39,12 +39,16 @@ import com.wepay.kafka.connect.bigquery.convert.MergeFieldBuilder;
 import com.wepay.kafka.connect.bigquery.convert.SchemaConverter;
 import com.wepay.kafka.connect.bigquery.exception.BigQueryConnectException;
 import com.wepay.kafka.connect.bigquery.utils.FieldNameSanitizer;
+import com.wepay.kafka.connect.bigquery.utils.SleepUtils;
 import com.wepay.kafka.connect.bigquery.utils.TableNameUtils;
+import com.wepay.kafka.connect.bigquery.write.row.BigQueryErrorResponses;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -80,6 +84,9 @@ public class SchemaManager {
   private final ConcurrentMap<TableId, Object> tableCreateLocks;
   private final ConcurrentMap<TableId, Object> tableUpdateLocks;
   private final ConcurrentMap<TableId, com.google.cloud.bigquery.Schema> schemaCache;
+
+  private static final int BQ_TABLE_UPDATE_RETRY_WAIT_MS = 10000;
+  private static final int BQ_TABLE_UPDATE_WAIT_MAX_JITTER = 4000;
 
   /**
    * @param schemaRetriever Used to determine the Kafka Connect Schema that should be used for a
@@ -216,7 +223,7 @@ public class SchemaManager {
    * @param table The BigQuery table to create,
    * @param records The sink records used to determine the schema.
    */
-  public void createOrUpdateTable(TableId table, List<SinkRecord> records) {
+  public void createOrUpdateTable(TableId table, List<SinkRecord> records) throws InterruptedException {
     synchronized (lock(tableCreateLocks, table)) {
       if (bigQuery.getTable(table) == null) {
         logger.debug("{} doesn't exist; creating instead of updating", table(table));
@@ -268,7 +275,7 @@ public class SchemaManager {
    * @param table The BigQuery table to update.
    * @param records The sink records used to update the schema.
    */
-  public void updateSchema(TableId table, List<SinkRecord> records) {
+  public void updateSchema(TableId table, List<SinkRecord> records) throws InterruptedException {
     synchronized (lock(tableUpdateLocks, table)) {
       TableInfo tableInfo = getTableInfo(table, records, false);
       if (!schemaCache.containsKey(table)) {
@@ -278,11 +285,48 @@ public class SchemaManager {
       if (!schemaCache.get(table).equals(tableInfo.getDefinition().getSchema())) {
         logger.info("Attempting to update {} with schema {}",
             table(table), tableInfo.getDefinition().getSchema());
-        bigQuery.update(tableInfo);
+
+        bigqueryTableUpdateRetry(table, tableInfo);
+
         logger.debug("Successfully updated {}", table(table));
         schemaCache.put(table, tableInfo.getDefinition().getSchema());
       } else {
         logger.debug("Skipping update of {} since current schema should be compatible", table(table));
+      }
+    }
+  }
+
+  private void bigqueryTableUpdateRetry(TableId table, TableInfo tableInfo) throws InterruptedException {
+    boolean success = false;
+    int retryCount = 0;
+    while (!success) {
+      try {
+        bigQuery.update(tableInfo);
+        success = true;
+      } catch (BigQueryException err) {
+        // This happens especially often a connector is restarted and there will be no cached tables in the connector
+        // resulting in hundreds of concurrent update/create
+        // requests (e.g. 200 topics * 4 consumers -> 800 requests > limit)
+
+        // as per documentation: https://cloud.google.com/bigquery/docs/troubleshoot-quotas
+        // rateLimitExceeded. This value indicates a short-term limit. To resolve these limit issues, retry the
+        // operation after few seconds. Use exponential backoff between retry attempts. That is, exponentially increase
+        // the delay between each retry.
+        if (BigQueryErrorResponses.isRateLimitExceededError(err)) {
+          logger.warn("RateLimiting Exception: {}, attempting retry. \n Table definition: {}",
+                  err.getCause().getMessage(),
+                  table.toString());
+          retryCount++;
+        } else {
+          throw err;
+        }
+
+        if (retryCount <= 5) {
+          SleepUtils.waitRandomTime(BQ_TABLE_UPDATE_RETRY_WAIT_MS, BQ_TABLE_UPDATE_WAIT_MAX_JITTER);
+        } else {
+          throw err;
+        }
+        retryCount += 1;
       }
     }
   }
@@ -314,6 +358,9 @@ public class SchemaManager {
       List<com.google.cloud.bigquery.Schema> bigQuerySchemas = getSchemasList(table, records);
       result = getUnionizedSchema(bigQuerySchemas);
     } else {
+      // TODO This code path is still subject to https://github.com/confluentinc/kafka-connect-bigquery/issues/221
+      // allowSchemaUnionization=true solves this
+
       com.google.cloud.bigquery.Schema existingSchema = readTableSchema(table);
       SinkRecord recordToConvert = getRecordToConvert(records);
       if (recordToConvert == null) {
@@ -351,6 +398,13 @@ public class SchemaManager {
       }
       bigQuerySchemas.add(convertRecordSchema(record));
     }
+    // Regular tables cannot start with DELETED (SQL-terminlogy)/Tombstone (Kafka-terminology) records,
+    // but intermediates can.
+    // That is perfectly normal, especially if a worker task was just restarted and millions of records were just
+    // deleted. Hence, it cannot return an empty list a new intermediate table should be created.
+    if (bigQuerySchemas.isEmpty() && intermediateTables){
+      bigQuerySchemas.add(convertRecordSchema(records.get(0)));
+    }
     return bigQuerySchemas;
   }
 
@@ -371,7 +425,7 @@ public class SchemaManager {
     return null;
   }
 
-  private com.google.cloud.bigquery.Schema convertRecordSchema(SinkRecord record) {
+  private com.google.cloud.bigquery.Schema convertRecordSchema(@Nonnull SinkRecord record) {
     Schema kafkaValueSchema = schemaRetriever.retrieveValueSchema(record);
     Schema kafkaKeySchema = kafkaKeyFieldName.isPresent() ? schemaRetriever.retrieveKeySchema(record) : null;
     com.google.cloud.bigquery.Schema result = getBigQuerySchema(kafkaKeySchema, kafkaValueSchema);
@@ -612,8 +666,13 @@ public class SchemaManager {
     return tableInfoBuilder.build();
   }
 
-  private com.google.cloud.bigquery.Schema getBigQuerySchema(Schema kafkaKeySchema, Schema kafkaValueSchema) {
-    com.google.cloud.bigquery.Schema valueSchema = schemaConverter.convertSchema(kafkaValueSchema);
+  private com.google.cloud.bigquery.Schema getBigQuerySchema(@Nullable Schema kafkaKeySchema, @Nullable Schema kafkaValueSchema) {
+    List<Field> valueSchema;
+    if (kafkaValueSchema != null) {
+      valueSchema = schemaConverter.convertSchema(kafkaValueSchema).getFields();
+    } else {
+      valueSchema = new ArrayList<>();
+    }
 
     List<Field> schemaFields = intermediateTables
         ? getIntermediateSchemaFields(valueSchema, kafkaKeySchema)
@@ -622,7 +681,7 @@ public class SchemaManager {
     return com.google.cloud.bigquery.Schema.of(schemaFields);
   }
 
-  private List<Field> getIntermediateSchemaFields(com.google.cloud.bigquery.Schema valueSchema, Schema kafkaKeySchema) {
+  private List<Field> getIntermediateSchemaFields(@Nonnull List<Field> valueSchema, Schema kafkaKeySchema) {
     if (kafkaKeySchema == null) {
       throw new BigQueryConnectException(String.format(
           "Cannot create intermediate table without specifying a value for '%s'",
@@ -632,7 +691,7 @@ public class SchemaManager {
 
     List<Field> result = new ArrayList<>();
 
-    List<Field> valueFields = new ArrayList<>(valueSchema.getFields());
+    List<Field> valueFields = new ArrayList<>(valueSchema);
     if (kafkaDataFieldName.isPresent()) {
       String dataFieldName = sanitizeFieldNames ?
           FieldNameSanitizer.sanitizeName(kafkaDataFieldName.get()) : kafkaDataFieldName.get();
@@ -647,12 +706,15 @@ public class SchemaManager {
       valueFields.add(debugMergeField);
     }
 
-    // Wrap the sink record value (and possibly also its Kafka data) in a struct in order to support deletes
-    Field wrappedValueField = Field
-        .newBuilder(MergeQueries.INTERMEDIATE_TABLE_VALUE_FIELD_NAME, LegacySQLTypeName.RECORD, valueFields.toArray(new Field[0]))
-        .setMode(Field.Mode.NULLABLE)
-        .build();
-    result.add(wrappedValueField);
+    // Fields could be all null if it is a tombstone message and the intermediate table was not created yet
+    if(!valueFields.isEmpty()) {
+      // Wrap the sink record value (and possibly also its Kafka data) in a struct in order to support deletes
+      Field wrappedValueField = Field
+              .newBuilder(MergeQueries.INTERMEDIATE_TABLE_VALUE_FIELD_NAME, LegacySQLTypeName.RECORD, valueFields.toArray(new Field[0]))
+              .setMode(Field.Mode.NULLABLE)
+              .build();
+      result.add(wrappedValueField);
+    }
 
     com.google.cloud.bigquery.Schema keySchema = schemaConverter.convertSchema(kafkaKeySchema);
     Field kafkaKeyField = Field.newBuilder(MergeQueries.INTERMEDIATE_TABLE_KEY_FIELD_NAME, LegacySQLTypeName.RECORD, keySchema.getFields())
@@ -681,9 +743,11 @@ public class SchemaManager {
     return result;
   }
 
-  private List<Field> getRegularSchemaFields(com.google.cloud.bigquery.Schema valueSchema, Schema kafkaKeySchema) {
-    List<Field> result = new ArrayList<>(valueSchema.getFields());
-
+  private List<Field> getRegularSchemaFields(@Nonnull List<Field> valueSchema, @Nullable Schema kafkaKeySchema) {
+    if (valueSchema.isEmpty()) {
+      throw new RuntimeException("A regular schema field would expect at least one field passed.");
+    }
+    List<Field> result = new ArrayList<>(valueSchema);
     if (kafkaDataFieldName.isPresent()) {
       String dataFieldName = sanitizeFieldNames ?
           FieldNameSanitizer.sanitizeName(kafkaDataFieldName.get()) : kafkaDataFieldName.get();

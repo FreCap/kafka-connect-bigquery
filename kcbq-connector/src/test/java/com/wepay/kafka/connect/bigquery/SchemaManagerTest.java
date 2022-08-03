@@ -20,8 +20,6 @@
 package com.wepay.kafka.connect.bigquery;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -44,13 +42,11 @@ import com.wepay.kafka.connect.bigquery.convert.SchemaConverter;
 
 import com.wepay.kafka.connect.bigquery.exception.BigQueryConnectException;
 import com.wepay.kafka.connect.bigquery.retrieve.IdentitySchemaRetriever;
-import java.util.Random;
 
 import com.wepay.kafka.connect.bigquery.utils.FieldNameSanitizer;
 import org.apache.kafka.connect.data.Schema;
 
 import org.apache.kafka.connect.data.SchemaBuilder;
-import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.junit.Assert;
 import org.junit.Before;
@@ -231,7 +227,7 @@ public class SchemaManagerTest {
     Optional<Long> testExpirationMs = Optional.of(86400000L);
     SchemaManager schemaManager = new SchemaManager(mockSchemaRetriever, mockSchemaConverter,
         mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(), Optional.empty(),
-           Optional.empty(), testExpirationMs, Optional.empty(), Optional.of(TimePartitioning.Type.DAY));
+        Optional.empty(), testExpirationMs, Optional.empty(), Optional.of(TimePartitioning.Type.DAY));
 
     when(mockSchemaConverter.convertSchema(mockKafkaSchema)).thenReturn(fakeBigQuerySchema);
     when(mockKafkaSchema.doc()).thenReturn(testDoc);
@@ -254,8 +250,8 @@ public class SchemaManagerTest {
     Optional<Long> testExpirationMs = Optional.of(86400000L);
     Optional<String> testField = Optional.of("testField");
     SchemaManager schemaManager = new SchemaManager(mockSchemaRetriever, mockSchemaConverter,
-        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(), Optional.empty(),
-        testField, testExpirationMs, Optional.empty(), Optional.of(TimePartitioning.Type.DAY));
+        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(), Optional.empty(), testField,
+        testExpirationMs, Optional.empty(), Optional.of(TimePartitioning.Type.DAY));
 
     when(mockSchemaConverter.convertSchema(mockKafkaSchema)).thenReturn(fakeBigQuerySchema);
     when(mockKafkaSchema.doc()).thenReturn(testDoc);
@@ -697,11 +693,32 @@ public class SchemaManagerTest {
   }
 
   @Test(expected = BigQueryConnectException.class)
-  public void testUpdateWithOnlyTombstoneRecordsNoExistingSchema() {
+  public void testUpdateWithOnlyTombstoneRecordsNoExistingSchemaNoUnionizationNoIntermediate() {
     SchemaManager schemaManager = createSchemaManager(true, false, false);
     List<SinkRecord> incomingSinkRecords = Collections.nCopies(2, recordWithValueSchema(null));
     testGetAndValidateProposedSchema(
         schemaManager, null, Collections.singletonList(null), null, incomingSinkRecords);
+  }
+
+  @Test
+  public void testUpdateWithOnlyTombstoneRecordsNoExistingSchemaUnionizationIntermediate() {
+    SchemaManager schemaManager = createSchemaManagerIntermediate(true, false, true);
+    List<SinkRecord> incomingSinkRecords = Collections.nCopies(2, recordWithValueSchema(null, mockKafkaSchema));
+
+    when(mockBigQuery.getTable(tableId)).thenReturn(null);
+
+    when(mockSchemaConverter.convertSchema(mockKafkaSchema)).thenReturn(fakeBigQuerySchema);
+
+    com.google.cloud.bigquery.Schema proposedSchema =
+            schemaManager.getAndValidateProposedSchema(tableId, incomingSinkRecords);
+
+    com.google.cloud.bigquery.Schema expandedSchema = com.google.cloud.bigquery.Schema.of(
+            Field.newBuilder("key", LegacySQLTypeName.RECORD, Field.of("mock field", LegacySQLTypeName.STRING) ).setMode(Field.Mode.REQUIRED).build(),
+            Field.newBuilder("i", LegacySQLTypeName.INTEGER).setMode(Field.Mode.REQUIRED).build(),
+            Field.newBuilder("partitionTime", LegacySQLTypeName.TIMESTAMP).setMode(Field.Mode.NULLABLE).build(),
+            Field.newBuilder("batchNumber", LegacySQLTypeName.INTEGER).setMode(Field.Mode.REQUIRED).build()
+    );
+    assertEquals(expandedSchema, proposedSchema);
   }
 
   @Test
@@ -753,8 +770,13 @@ public class SchemaManagerTest {
       boolean allowNewFields, boolean allowFieldRelaxation, boolean allowUnionization) {
     return new SchemaManager(new IdentitySchemaRetriever(), mockSchemaConverter, mockBigQuery,
         allowNewFields, allowFieldRelaxation, allowUnionization, false,
-        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+             Optional.of("kafkakey"),Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
         Optional.of(TimePartitioning.Type.DAY));
+  }
+
+  private SchemaManager createSchemaManagerIntermediate(
+          boolean allowNewFields, boolean allowFieldRelaxation, boolean allowUnionization) {
+    return createSchemaManager(allowNewFields, allowFieldRelaxation, allowUnionization).forIntermediateTables();
   }
 
   private void testGetAndValidateProposedSchema(
@@ -815,6 +837,12 @@ public class SchemaManagerTest {
   private SinkRecord recordWithValueSchema(Schema valueSchema) {
     SinkRecord result = mock(SinkRecord.class);
     when(result.valueSchema()).thenReturn(valueSchema);
+    return result;
+  }
+
+  private SinkRecord recordWithValueSchema(Schema valueSchema, Schema keySchema) {
+    SinkRecord result = recordWithValueSchema(valueSchema);
+    when(result.keySchema()).thenReturn(keySchema);
     return result;
   }
 

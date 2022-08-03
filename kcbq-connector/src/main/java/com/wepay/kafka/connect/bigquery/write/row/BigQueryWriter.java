@@ -74,7 +74,7 @@ public abstract class BigQueryWriter {
   protected abstract Map<Long, List<BigQueryError>> performWriteRequest(
           PartitionedTableId tableId,
           SortedMap<SinkRecord, InsertAllRequest.RowToInsert> rows)
-      throws BigQueryException, BigQueryConnectException;
+          throws BigQueryException, BigQueryConnectException, InterruptedException;
 
   /**
    * Create an InsertAllRequest.

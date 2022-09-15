@@ -44,6 +44,7 @@ import com.wepay.kafka.connect.bigquery.exception.BigQueryConnectException;
 import com.wepay.kafka.connect.bigquery.retrieve.IdentitySchemaRetriever;
 
 import com.wepay.kafka.connect.bigquery.utils.FieldNameSanitizer;
+import org.apache.avro.generic.GenericData;
 import org.apache.kafka.connect.data.Schema;
 
 import org.apache.kafka.connect.data.SchemaBuilder;
@@ -111,8 +112,9 @@ public class SchemaManagerTest {
   public void testTimestampPartitionSet() {
     Optional<String> testField = Optional.of("testField");
     SchemaManager schemaManager = new SchemaManager(mockSchemaRetriever, mockSchemaConverter,
-        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(), testField,
-        Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(TimePartitioning.Type.DAY));
+        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(),
+        Optional.empty(), testField,
+        Optional.empty(), Optional.empty(), Optional.of(TimePartitioning.Type.DAY));
 
     when(mockSchemaConverter.convertSchema(mockKafkaSchema)).thenReturn(fakeBigQuerySchema);
     when(mockKafkaSchema.doc()).thenReturn(testDoc);
@@ -275,8 +277,9 @@ public class SchemaManagerTest {
     Optional<String> timestampPartitionFieldName = Optional.of("testField");
     Optional<List<String>> testField = Optional.of(Arrays.asList("column1", "column2"));
     SchemaManager schemaManager = new SchemaManager(mockSchemaRetriever, mockSchemaConverter,
-        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(), timestampPartitionFieldName,
-        Optional.empty(), Optional.empty(), testField, Optional.of(TimePartitioning.Type.DAY));
+        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(),
+        Optional.empty(), timestampPartitionFieldName,
+        Optional.empty(), testField, Optional.of(TimePartitioning.Type.DAY));
 
     when(mockSchemaConverter.convertSchema(mockKafkaSchema)).thenReturn(fakeBigQuerySchema);
     when(mockKafkaSchema.doc()).thenReturn(testDoc);
@@ -318,8 +321,9 @@ public class SchemaManagerTest {
     Optional<String> timestampPartitionFieldName = Optional.of("testField");
     Optional<List<String>> testField = Optional.of(Arrays.asList("column1", "column2"));
     SchemaManager schemaManager = new SchemaManager(mockSchemaRetriever, mockSchemaConverter,
-        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(), timestampPartitionFieldName,
-        Optional.empty(), Optional.empty(), testField, Optional.of(TimePartitioning.Type.DAY));
+        mockBigQuery, false, false, false, false, Optional.empty(), Optional.empty(),
+        Optional.empty(), timestampPartitionFieldName,
+        Optional.empty(), testField, Optional.of(TimePartitioning.Type.DAY));
 
     when(mockSchemaConverter.convertSchema(mockKafkaSchema)).thenReturn(fakeBigQuerySchema);
     when(mockKafkaSchema.doc()).thenReturn(testDoc);
@@ -768,15 +772,22 @@ public class SchemaManagerTest {
 
   private SchemaManager createSchemaManager(
       boolean allowNewFields, boolean allowFieldRelaxation, boolean allowUnionization) {
+    return createSchemaManager(allowNewFields, allowFieldRelaxation, allowUnionization, false);
+  }
+
+  private SchemaManager createSchemaManager(
+      boolean allowNewFields, boolean allowFieldRelaxation, boolean allowUnionization, boolean useKafkaKey) {
     return new SchemaManager(new IdentitySchemaRetriever(), mockSchemaConverter, mockBigQuery,
         allowNewFields, allowFieldRelaxation, allowUnionization, false,
-             Optional.of("kafkakey"),Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+        useKafkaKey ? Optional.of("kafkakey") : Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
         Optional.of(TimePartitioning.Type.DAY));
   }
 
   private SchemaManager createSchemaManagerIntermediate(
           boolean allowNewFields, boolean allowFieldRelaxation, boolean allowUnionization) {
-    return createSchemaManager(allowNewFields, allowFieldRelaxation, allowUnionization).forIntermediateTables();
+    return createSchemaManager(allowNewFields, allowFieldRelaxation, allowUnionization,
+        // if it is intermediate, it needs the kafkaKey
+        true).forIntermediateTables();
   }
 
   private void testGetAndValidateProposedSchema(

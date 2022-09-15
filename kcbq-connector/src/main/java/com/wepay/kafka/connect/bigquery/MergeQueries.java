@@ -29,6 +29,7 @@ import com.google.cloud.bigquery.TableId;
 import com.google.common.annotations.VisibleForTesting;
 import com.wepay.kafka.connect.bigquery.config.BigQuerySinkTaskConfig;
 import com.wepay.kafka.connect.bigquery.exception.BigQueryConnectException;
+import com.wepay.kafka.connect.bigquery.exception.ExpectedInterruptException;
 import com.wepay.kafka.connect.bigquery.utils.SleepUtils;
 import com.wepay.kafka.connect.bigquery.write.batch.KCBQThreadPoolExecutor;
 import com.wepay.kafka.connect.bigquery.write.batch.MergeBatches;
@@ -143,9 +144,16 @@ public class MergeQueries {
     executor.execute(() -> {
       boolean shouldRunNextMerge = false;
       Lock lock = intermediateTableToMergeFlushLock.computeIfAbsent(intermediateTable, s -> new ReentrantLock());
+      boolean getLock;
       try {
-        if (lock.tryLock(2, TimeUnit.MINUTES)) {
-
+        getLock = lock.tryLock(2, TimeUnit.MINUTES);
+      } catch (InterruptedException e) {
+        logger.error("Interrupted exception while", e);
+        // if it was interrupted by the timeout, we want to retry in
+        throw new ExpectedInterruptException(e.getMessage());
+      }
+      if (getLock) {
+        try {
           int currentBatchNumber = intermediateTableToMergedFlushCount.computeIfAbsent(intermediateTable,
               s -> new AtomicInteger()).get();
           if (currentBatchNumber < mergeBatches.getCurrentBatchNumber(intermediateTable)) {
@@ -161,20 +169,17 @@ public class MergeQueries {
             // if the current batch was lower than the last, we need to try the next
             shouldRunNextMerge = true;
           }
+        } catch (InterruptedException e) {
+          logger.error("Interrupt while performing merge flush of batch %d from %s to %s. ", e);
+          shouldRunNextMerge = true;
+        } catch (Exception e) {
+          logger.error("Exception while performing merge flush of batch %d from %s to %s, rethrow", e);
+          throw new ConnectException(e);
+        } finally {
+          lock.unlock();
         }
-      } catch (InterruptedException e) {
-        logger.error("Timeout while performing merge flush of batch %d from %s to %s. " +
-            "It could have been triggered by a lock that couldn't be acquired, retry", e);
-        // if it was interrupted by the timeout, we want to retry in
-        shouldRunNextMerge = true;
-      } catch (Exception e) {
-        logger.error("Exception while performing merge flush of batch %d from %s to %s, rethrow", e);
-        throw new ConnectException(e);
-      } finally {
-        lock.unlock();
       }
-
-      if (shouldRunNextMerge) {
+      if (shouldRunNextMerge || !getLock) {
         // running outside the "try" since the lock is held by the current thread, and run next spins up the next run
         // in another thread which would cause an IllegalMonitorStateException
         runNextMergeFlushAsync(intermediateTable, destinationTable);

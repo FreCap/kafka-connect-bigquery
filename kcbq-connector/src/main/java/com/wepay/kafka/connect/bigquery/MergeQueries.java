@@ -41,6 +41,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -67,6 +70,8 @@ public class MergeQueries {
   private final BigQuery bigQuery;
   private final SchemaManager schemaManager;
   private final SinkTaskContext context;
+
+  private final Map<TableId, AtomicInteger> intermediateTableToMergedFlushCount = new ConcurrentHashMap<>();
 
   public MergeQueries(BigQuerySinkTaskConfig config,
                       MergeBatches mergeBatches,
@@ -116,18 +121,34 @@ public class MergeQueries {
   }
 
   public void mergeFlush(TableId intermediateTable) {
+    final int batchNumber = mergeBatches.getAndIncrementBatch(intermediateTable);
     final TableId destinationTable = mergeBatches.destinationTableFor(intermediateTable);
-    final int batchNumber = mergeBatches.incrementBatch(intermediateTable);
-    logger.trace("Triggering merge flush from {} to {} for batch {}",
-        intTable(intermediateTable), destTable(destinationTable), batchNumber);
+
+    intermediateTableToMergedFlushCount.computeIfAbsent(intermediateTable, s -> new AtomicInteger());
+
+    logger.trace("Triggering merge flush from {} to {} for batch {}, last batc {}", intTable(intermediateTable),
+        destTable(destinationTable),
+        intermediateTableToMergedFlushCount.get(intermediateTable).get(),
+        batchNumber);
 
     executor.execute(() -> {
-      try {
-        mergeFlush(intermediateTable, destinationTable, batchNumber);
-      } catch (InterruptedException e) {
-        throw new ExpectedInterruptException(String.format(
-            "Interrupted while performing merge flush of batch %d from %s to %s",
-            batchNumber, intTable(intermediateTable), destTable(destinationTable)));
+      int currentBatchNumber;
+      // execute the batches for a given intermediateTable in order once they acquired the thread (to avoid deadlock)
+      while ((currentBatchNumber = intermediateTableToMergedFlushCount.get(intermediateTable)
+          .getAndUpdate(operand -> operand < mergeBatches.getCurrentBatchNumber(intermediateTable) ? operand + 1 : operand))
+          < mergeBatches.getCurrentBatchNumber(intermediateTable)) {
+
+        logger.trace("Triggering merge flush from {} to {} for batch {}, last batch {}", intTable(intermediateTable),
+            destTable(destinationTable),
+            currentBatchNumber,
+            mergeBatches.getCurrentBatchNumber(intermediateTable));
+        try {
+          mergeFlush(intermediateTable, destinationTable, currentBatchNumber);
+        } catch (InterruptedException e) {
+          throw new ExpectedInterruptException(String.format(
+              "Interrupted while performing merge flush of batch %d from %s to %s",
+              currentBatchNumber, intTable(intermediateTable), destTable(destinationTable)));
+        }
       }
     });
   }

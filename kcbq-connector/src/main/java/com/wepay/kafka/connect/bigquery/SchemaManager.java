@@ -32,7 +32,6 @@ import com.google.cloud.bigquery.TableInfo;
 import com.google.cloud.bigquery.TimePartitioning;
 import com.google.cloud.bigquery.TimePartitioning.Type;
 import com.google.common.annotations.VisibleForTesting;
-import com.sun.istack.internal.NotNull;
 import com.wepay.kafka.connect.bigquery.api.SchemaRetriever;
 import com.wepay.kafka.connect.bigquery.config.BigQuerySinkConfig;
 import com.wepay.kafka.connect.bigquery.convert.KafkaDataBuilder;
@@ -47,6 +46,7 @@ import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -418,7 +418,7 @@ public class SchemaManager {
     return null;
   }
 
-  private com.google.cloud.bigquery.Schema convertRecordSchema(@NotNull SinkRecord record) {
+  private com.google.cloud.bigquery.Schema convertRecordSchema(@Nonnull SinkRecord record) {
     Schema kafkaValueSchema = schemaRetriever.retrieveValueSchema(record);
     Schema kafkaKeySchema = kafkaKeyFieldName.isPresent() ? schemaRetriever.retrieveKeySchema(record) : null;
     com.google.cloud.bigquery.Schema result = getBigQuerySchema(kafkaKeySchema, kafkaValueSchema);
@@ -674,7 +674,7 @@ public class SchemaManager {
     return com.google.cloud.bigquery.Schema.of(schemaFields);
   }
 
-  private List<Field> getIntermediateSchemaFields(@NotNull List<Field> valueSchema, Schema kafkaKeySchema) {
+  private List<Field> getIntermediateSchemaFields(@Nonnull List<Field> valueSchema, Schema kafkaKeySchema) {
     if (kafkaKeySchema == null) {
       throw new BigQueryConnectException(String.format(
           "Cannot create intermediate table without specifying a value for '%s'",
@@ -729,7 +729,7 @@ public class SchemaManager {
     return result;
   }
 
-  private List<Field> getRegularSchemaFields(@NotNull List<Field> valueSchema, @Nullable Schema kafkaKeySchema) {
+  private List<Field> getRegularSchemaFields(@Nonnull List<Field> valueSchema, @Nullable Schema kafkaKeySchema) {
     if (valueSchema.isEmpty()) {
       throw new RuntimeException("A regular schema field would expect at least one field passed.");
     }

@@ -64,7 +64,7 @@ public class UpsertDeleteBigQueryWriter extends AdaptiveBigQueryWriter {
   }
 
   @Override
-  protected void attemptSchemaUpdate(PartitionedTableId tableId, List<SinkRecord> records) {
+  protected void attemptSchemaUpdate(PartitionedTableId tableId, List<SinkRecord> records) throws InterruptedException {
     // Update the intermediate table here...
     super.attemptSchemaUpdate(tableId, records);
     try {
@@ -77,7 +77,7 @@ public class UpsertDeleteBigQueryWriter extends AdaptiveBigQueryWriter {
   }
 
   @Override
-  protected void attemptTableCreate(TableId tableId, List<SinkRecord> records) {
+  protected void attemptTableCreate(TableId tableId, List<SinkRecord> records) throws InterruptedException {
     // Create the intermediate table here...
     super.attemptTableCreate(tableId, records);
     if (autoCreateTables) {

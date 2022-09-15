@@ -35,6 +35,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.wepay.kafka.connect.bigquery.api.SchemaRetriever;
 import com.wepay.kafka.connect.bigquery.config.BigQuerySinkConfig;
 import com.wepay.kafka.connect.bigquery.convert.KafkaDataBuilder;
+import com.wepay.kafka.connect.bigquery.convert.MergeFieldBuilder;
 import com.wepay.kafka.connect.bigquery.convert.SchemaConverter;
 import com.wepay.kafka.connect.bigquery.exception.BigQueryConnectException;
 import com.wepay.kafka.connect.bigquery.utils.FieldNameSanitizer;
@@ -74,6 +75,7 @@ public class SchemaManager {
   private final boolean sanitizeFieldNames;
   private final Optional<String> kafkaKeyFieldName;
   private final Optional<String> kafkaDataFieldName;
+  private final Optional<String> debugMergeDataFieldName;
   private final Optional<String> timestampPartitionFieldName;
   private final Optional<Long> partitionExpiration;
   private final Optional<List<String>> clusteringFieldName;
@@ -116,6 +118,7 @@ public class SchemaManager {
       boolean sanitizeFieldNames,
       Optional<String> kafkaKeyFieldName,
       Optional<String> kafkaDataFieldName,
+      Optional<String> debugMergeDataFieldName,
       Optional<String> timestampPartitionFieldName,
       Optional<Long> partitionExpiration,
       Optional<List<String>> clusteringFieldName,
@@ -130,6 +133,7 @@ public class SchemaManager {
         sanitizeFieldNames,
         kafkaKeyFieldName,
         kafkaDataFieldName,
+        debugMergeDataFieldName,
         timestampPartitionFieldName,
         partitionExpiration,
         clusteringFieldName,
@@ -150,6 +154,7 @@ public class SchemaManager {
       boolean sanitizeFieldNames,
       Optional<String> kafkaKeyFieldName,
       Optional<String> kafkaDataFieldName,
+      Optional<String> debugMergeDataFieldName,
       Optional<String> timestampPartitionFieldName,
       Optional<Long> partitionExpiration,
       Optional<List<String>> clusteringFieldName,
@@ -167,6 +172,7 @@ public class SchemaManager {
     this.sanitizeFieldNames = sanitizeFieldNames;
     this.kafkaKeyFieldName = kafkaKeyFieldName;
     this.kafkaDataFieldName = kafkaDataFieldName;
+    this.debugMergeDataFieldName = debugMergeDataFieldName;
     this.timestampPartitionFieldName = timestampPartitionFieldName;
     this.partitionExpiration = partitionExpiration;
     this.clusteringFieldName = clusteringFieldName;
@@ -188,6 +194,7 @@ public class SchemaManager {
         sanitizeFieldNames,
         kafkaKeyFieldName,
         kafkaDataFieldName,
+        debugMergeDataFieldName,
         timestampPartitionFieldName,
         partitionExpiration,
         clusteringFieldName,
@@ -692,6 +699,13 @@ public class SchemaManager {
       valueFields.add(kafkaDataField);
     }
 
+    if (debugMergeDataFieldName.isPresent()) {
+      String debugMergeFieldName = sanitizeFieldNames ?
+              FieldNameSanitizer.sanitizeName(debugMergeDataFieldName.get()) : debugMergeDataFieldName.get();
+      Field debugMergeField = MergeFieldBuilder.buildMergeField(debugMergeFieldName);
+      valueFields.add(debugMergeField);
+    }
+
     // Fields could be all null if it is a tombstone message and the intermediate table was not created yet
     if(!valueFields.isEmpty()) {
       // Wrap the sink record value (and possibly also its Kafka data) in a struct in order to support deletes
@@ -739,6 +753,13 @@ public class SchemaManager {
           FieldNameSanitizer.sanitizeName(kafkaDataFieldName.get()) : kafkaDataFieldName.get();
       Field kafkaDataField = KafkaDataBuilder.buildKafkaDataField(dataFieldName);
       result.add(kafkaDataField);
+    }
+
+    if (debugMergeDataFieldName.isPresent()) {
+      String debugMergeFieldName = sanitizeFieldNames ?
+              FieldNameSanitizer.sanitizeName(debugMergeDataFieldName.get()) : debugMergeDataFieldName.get();
+      Field debugMergeField = MergeFieldBuilder.buildMergeField(debugMergeFieldName);
+      result.add(debugMergeField);
     }
 
     if (kafkaKeyFieldName.isPresent()) {
